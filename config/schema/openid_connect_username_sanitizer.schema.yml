@@ -1,0 +1,7 @@
+openid_connect_username_sanitizer.settings:
+  type: config_object
+  label: 'OpenID Connect Username Sanitizer settings'
+  mapping:
+    enabled:
+      type: boolean
+      label: 'Sanitise SSO username-candidate claims before openid_connect uses them'

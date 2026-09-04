@@ -1,0 +1,6 @@
+openid_connect_username_sanitizer.settings:
+  title: 'OpenID Connect Username Sanitizer'
+  description: 'Configure automatic sanitisation of OpenID Connect SSO username claims.'
+  parent: system.admin_config_system
+  route_name: openid_connect_username_sanitizer.settings
+  weight: 100

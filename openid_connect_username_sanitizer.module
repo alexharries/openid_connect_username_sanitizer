@@ -1,0 +1,201 @@
+<?php
+
+/**
+ * @file
+ * Sanitises OpenID Connect SSO username-candidate claims before Drupal
+ * validates them, so a Drupal-invalid character (or excessive length) sent
+ * by an identity provider cannot silently block account creation. See
+ * README.md for the full background.
+ *
+ * Deliberately has no dependency on the openid_connect module: this
+ * module's hook is simply never invoked on a site that doesn't have
+ * openid_connect enabled, so declaring a hard dependency would only force
+ * an unwanted install of the whole openid_connect module (its config
+ * forms, routes and client entities) onto sites with no SSO integration
+ * at all.
+ */
+
+declare(strict_types=1);
+
+use Drupal\user\UserInterface;
+
+/**
+ * The logger channel this module writes to.
+ */
+const OPENID_CONNECT_USERNAME_SANITIZER_LOGGER_CHANNEL = 'openid_connect_username_sanitizer';
+
+/**
+ * The flood event name used to rate-limit the debug log below.
+ */
+const OPENID_CONNECT_USERNAME_SANITIZER_FLOOD_EVENT = 'openid_connect_username_sanitizer.sanitised_claim';
+
+/**
+ * Maximum debug log entries per identity-provider client per flood window.
+ *
+ * A single misconfigured or malicious identity provider sending malformed
+ * claims on every login could otherwise flood the site's log with
+ * near-identical debug entries. The flood identifier is the SSO client ID
+ * (openid_connect's plugin_id), so a busy but well-behaved client on the
+ * same site isn't silenced by a different, misbehaving one.
+ */
+const OPENID_CONNECT_USERNAME_SANITIZER_FLOOD_THRESHOLD = 20;
+
+/**
+ * The flood window, in seconds (1 hour), paired with the threshold above.
+ */
+const OPENID_CONNECT_USERNAME_SANITIZER_FLOOD_WINDOW = 3600;
+
+/**
+ * SSO claim keys that openid_connect's OpenIDConnect::generateUsername()
+ * may use verbatim as the Drupal username, in its own priority order. Both
+ * are sanitised unconditionally here, regardless of which one
+ * generateUsername() ends up actually using.
+ */
+const OPENID_CONNECT_USERNAME_SANITIZER_CLAIM_KEYS = ['preferred_username', 'name'];
+
+/**
+ * Implements hook_openid_connect_userinfo_alter().
+ *
+ * openid_connect's OpenIDConnect::generateUsername() uses
+ * $userinfo['preferred_username'] or $userinfo['name'] verbatim as the
+ * Drupal username, without checking it against Drupal's own username
+ * validation rules first. Neither openid_connect nor
+ * openid_connect_windows_aad sanitises these claims - see README.md for
+ * the related Drupal.org issues, and confirmation that this hook is the
+ * intended place to fix this.
+ */
+function openid_connect_username_sanitizer_openid_connect_userinfo_alter(array &$userinfo, array $context) {
+  if (!\Drupal::config('openid_connect_username_sanitizer.settings')->get('enabled')) {
+    return;
+  }
+
+  foreach (OPENID_CONNECT_USERNAME_SANITIZER_CLAIM_KEYS as $key) {
+    if (!isset($userinfo[$key]) || !is_string($userinfo[$key]) || $userinfo[$key] === '') {
+      continue;
+    }
+
+    $original = $userinfo[$key];
+    $sanitized = _openid_connect_username_sanitizer_sanitize_username($original);
+
+    if ($sanitized === $original) {
+      continue;
+    }
+
+    if ($sanitized === '') {
+      // Nothing usable survived sanitisation - unset (not blank) so
+      // openid_connect's own !empty() candidate check moves on to the
+      // next candidate, and eventually its safe oidc_{client}_{hash}
+      // fallback, rather than trying to use an empty username.
+      unset($userinfo[$key]);
+    }
+    else {
+      $userinfo[$key] = $sanitized;
+    }
+
+    _openid_connect_username_sanitizer_log($key, $original, $sanitized, $context['plugin_id'] ?? 'unknown');
+  }
+}
+
+/**
+ * Implements hook_module_implements_alter().
+ *
+ * Ensures this module's hook_openid_connect_userinfo_alter() implementation
+ * always runs last, so any other module's own implementation of the same
+ * hook (for example, a site-specific SSO integration) sees the identity
+ * provider's raw, unaltered claim values, and this module only ever
+ * sanitises whatever value is left once every other hook has had its turn.
+ */
+function openid_connect_username_sanitizer_module_implements_alter(&$implementations, $hook) {
+  if ($hook === 'openid_connect_userinfo_alter' && isset($implementations['openid_connect_username_sanitizer'])) {
+    $group = $implementations['openid_connect_username_sanitizer'];
+    unset($implementations['openid_connect_username_sanitizer']);
+    $implementations['openid_connect_username_sanitizer'] = $group;
+  }
+}
+
+/**
+ * Logs a sanitisation event at debug level, rate-limited via Drupal's core
+ * flood service.
+ *
+ * @param string $key
+ *   The claim key that was changed ('name' or 'preferred_username').
+ * @param string $before
+ *   The original claim value.
+ * @param string $after
+ *   The sanitised claim value (empty string if nothing usable survived).
+ * @param string $client_id
+ *   The openid_connect client/plugin ID, used as the flood identifier.
+ */
+function _openid_connect_username_sanitizer_log(string $key, string $before, string $after, string $client_id): void {
+  $flood = \Drupal::service('flood');
+
+  if (!$flood->isAllowed(OPENID_CONNECT_USERNAME_SANITIZER_FLOOD_EVENT, OPENID_CONNECT_USERNAME_SANITIZER_FLOOD_THRESHOLD, OPENID_CONNECT_USERNAME_SANITIZER_FLOOD_WINDOW, $client_id)) {
+    return;
+  }
+  $flood->register(OPENID_CONNECT_USERNAME_SANITIZER_FLOOD_EVENT, OPENID_CONNECT_USERNAME_SANITIZER_FLOOD_WINDOW, $client_id);
+
+  \Drupal::logger(OPENID_CONNECT_USERNAME_SANITIZER_LOGGER_CHANNEL)->debug('Sanitised the SSO "@key" username-candidate claim from client "@client" so it would pass Drupal username validation. Before: "@before". After: @after.', [
+    '@key' => $key,
+    '@client' => $client_id,
+    '@before' => $before,
+    '@after' => $after === '' ? '(empty - claim removed; openid_connect will fall back to its next username candidate)' : '"' . $after . '"',
+  ]);
+}
+
+/**
+ * Sanitises a single SSO username-candidate claim value.
+ *
+ * Mirrors \Drupal\user\Plugin\Validation\Constraint\UserNameConstraintValidator::validate()
+ * exactly: the same two regexes, applied one Unicode character at a time
+ * (via preg_match(), matching how core itself tests them) so that only the
+ * actual illegal characters are dropped, rather than rejecting the whole
+ * claim. Core's first regex deliberately omits the /u modifier - without
+ * it, PCRE matches raw bytes rather than Unicode code points, which is why
+ * core's second regex (which does use /u) exists at all: to catch specific
+ * multibyte characters (soft hyphen, NBSP, BOM, etc.) that the first
+ * regex's byte-oriented \x{80}-\x{F7} range would otherwise let through.
+ * Do not "fix" the missing /u on the first pattern below - that would
+ * silently diverge from what core actually validates against.
+ *
+ * IMPORTANT: keep both patterns in sync with core - re-diff them against
+ * \Drupal\user\Plugin\Validation\Constraint\UserNameConstraintValidator.php
+ * after any major Drupal core upgrade.
+ *
+ * Also truncates the result, with headroom for openid_connect's own
+ * "_1", "_2", etc. suffix on a duplicate username.
+ *
+ * @param string $value
+ *   The raw claim value.
+ *
+ * @return string
+ *   The sanitised value. Empty string if nothing usable remains.
+ */
+function _openid_connect_username_sanitizer_sanitize_username(string $value): string {
+  $characters = mb_str_split($value);
+  $kept = [];
+
+  foreach ($characters as $character) {
+    $illegal = preg_match('/[^\x{80}-\x{F7} a-z0-9@+_.\'-]/i', $character)
+      || preg_match(
+        '/[\x{80}-\x{A0}\x{AD}\x{2000}-\x{200F}\x{2028}-\x{202F}\x{205F}-\x{206F}\x{FEFF}\x{FF01}-\x{FF60}\x{FFF9}-\x{FFFD}\x{0}-\x{1F}]/u',
+        $character
+      );
+
+    if (!$illegal) {
+      $kept[] = $character;
+    }
+  }
+
+  $value = implode('', $kept);
+
+  // Collapse repeated spaces and trim - a username can't start/end with a
+  // space, or contain two in a row (UserNameConstraintValidator checks
+  // these separately from the illegal-character checks above).
+  $value = trim(preg_replace('/ {2,}/', ' ', $value) ?? '');
+
+  // Truncate with headroom for openid_connect's duplicate-username suffix.
+  $value = mb_substr($value, 0, UserInterface::USERNAME_MAX_LENGTH - 5);
+
+  // Truncation can leave a trailing space; re-trim.
+  return trim($value);
+}

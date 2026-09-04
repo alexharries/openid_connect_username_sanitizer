@@ -1,0 +1,5 @@
+name: 'OpenID Connect Username Sanitizer'
+description: 'Sanitises OpenID Connect username-candidate claims (preferred_username/name) so a Drupal-invalid character or excessive length sent by an identity provider cannot silently block account creation.'
+type: module
+core_version_requirement: '^10 || ^11'
+configure: openid_connect_username_sanitizer.settings

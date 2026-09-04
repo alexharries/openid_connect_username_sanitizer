@@ -1,0 +1,7 @@
+openid_connect_username_sanitizer.settings:
+  path: '/admin/config/system/openid-connect-username-sanitizer'
+  defaults:
+    _form: '\Drupal\openid_connect_username_sanitizer\Form\SettingsForm'
+    _title: 'OpenID Connect Username Sanitizer settings'
+  requirements:
+    _permission: 'administer site configuration'
