@@ -54,6 +54,20 @@ const OPENID_CONNECT_USERNAME_SANITIZER_FLOOD_WINDOW = 3600;
 const OPENID_CONNECT_USERNAME_SANITIZER_CLAIM_KEYS = ['preferred_username', 'name'];
 
 /**
+ * Upper bound, in characters, on how much of a raw claim is processed.
+ *
+ * The final result is truncated to UserInterface::USERNAME_MAX_LENGTH - 5
+ * (55) characters regardless, but that truncation happens only after every
+ * character has been checked against two regexes. Capping the input first
+ * bounds that work against a claim of unbounded length - for example, from
+ * a compromised or misconfigured identity provider - without affecting any
+ * realistic claim (this is comfortably larger than any real display name
+ * or username would ever need to be, and far larger than the 55-character
+ * result the value is truncated to anyway).
+ */
+const OPENID_CONNECT_USERNAME_SANITIZER_MAX_INPUT_LENGTH = 500;
+
+/**
  * Implements hook_openid_connect_userinfo_alter().
  *
  * openid_connect's OpenIDConnect::generateUsername() uses
@@ -162,7 +176,9 @@ function _openid_connect_username_sanitizer_log(string $key, string $before, str
  * after any major Drupal core upgrade.
  *
  * Also truncates the result, with headroom for openid_connect's own
- * "_1", "_2", etc. suffix on a duplicate username.
+ * "_1", "_2", etc. suffix on a duplicate username. The raw input is itself
+ * capped first, at OPENID_CONNECT_USERNAME_SANITIZER_MAX_INPUT_LENGTH, so
+ * that an unusually large claim can't force unbounded per-character work.
  *
  * @param string $value
  *   The raw claim value.
@@ -171,7 +187,7 @@ function _openid_connect_username_sanitizer_log(string $key, string $before, str
  *   The sanitised value. Empty string if nothing usable remains.
  */
 function _openid_connect_username_sanitizer_sanitize_username(string $value): string {
-  $characters = mb_str_split($value);
+  $characters = mb_str_split(mb_substr($value, 0, OPENID_CONNECT_USERNAME_SANITIZER_MAX_INPUT_LENGTH));
   $kept = [];
 
   foreach ($characters as $character) {

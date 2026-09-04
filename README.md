@@ -25,7 +25,7 @@ names, e.g. `"[Acme Ltd] Jane Doe"`, will produce this error for every such acco
 brackets are outside Drupal's allowed username character set - with no record anywhere of what the
 actual claim value was.
 
-This is a known, previously-reported issue, not something new:
+This is a known, previously-reported issue:
 
 - [OpenID connect doesn't validate usernames (#3294141)](https://www.drupal.org/project/openid_connect/issues/3294141) -
   the same symptom: an identity-provider-supplied name containing an illegal character breaks

@@ -6,6 +6,7 @@ namespace Drupal\Tests\openid_connect_username_sanitizer\Kernel;
 
 use Drupal\KernelTests\KernelTestBase;
 use Drupal\user\Entity\User;
+use Drupal\user\UserInterface;
 
 /**
  * Tests the username sanitisation logic against Drupal's own validation.
@@ -92,6 +93,24 @@ class UsernameSanitizerTest extends KernelTestBase {
    */
   public function testWhollyIllegalClaimSanitizesToEmptyString(): void {
     $this->assertSame('', _openid_connect_username_sanitizer_sanitize_username('######'));
+  }
+
+  /**
+   * Truncation leaves exactly 5 characters of headroom, not just <=60.
+   *
+   * Drupal's own validator only requires <=60 characters, so a test that
+   * merely checks the sanitised output is valid wouldn't catch a
+   * regression that truncated to 60 instead of 55 - that would still
+   * "pass" validation today, while silently reintroducing the
+   * duplicate-username-suffix failure this module exists to prevent (a
+   * 60-character username becomes invalid the moment openid_connect
+   * appends its own "_1" suffix on a collision). Assert the exact
+   * boundary explicitly.
+   */
+  public function testTruncationLeavesFiveCharactersOfHeadroom(): void {
+    $sanitized = _openid_connect_username_sanitizer_sanitize_username(str_repeat('x', 100));
+
+    $this->assertSame(UserInterface::USERNAME_MAX_LENGTH - 5, mb_strlen($sanitized));
   }
 
   /**
