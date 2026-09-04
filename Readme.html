@@ -1,0 +1,90 @@
+Sanitises OpenID Connect SSO username-candidate claims (<code>preferred_username</code> and
+<code>name</code>) before they're used to generate a Drupal username, so a character an identity
+provider sends that Drupal's own username validation rejects can't silently block account
+creation.
+
+<h3 id="module-project--features">Features</h3>
+
+<p>The <a href="https://www.drupal.org/project/openid_connect">OpenID Connect</a> module builds a
+new user's Drupal username from the SSO <code>preferred_username</code> or <code>name</code>
+claim, in preference to their email address. Neither OpenID Connect nor its
+<a href="https://www.drupal.org/project/openid_connect_windows_aad">Windows AAD</a> sub-module
+checks that value against Drupal's own username rules first. When the claim contains a character
+outside Drupal's allowed username set - or is simply too long - account creation fails outright,
+and the resulting error log doesn't record what the actual claim value was:</p>
+
+<blockquote>Failed to create user account for user@example.com: The username contains an illegal
+character.</blockquote>
+
+<p>A real-world example: an identity provider that prefixes organisation-type accounts' display
+names, e.g. <code>"[Acme Ltd] Jane Doe"</code>, will produce this error for every such account -
+the square brackets are outside Drupal's allowed username character set.</p>
+
+<p>This is a known, previously-reported problem:</p>
+
+<ul>
+<li><a href="https://www.drupal.org/project/openid_connect/issues/3294141">OpenID connect doesn't validate usernames (#3294141)</a>
+- the same symptom: an identity-provider-supplied name containing an illegal character breaks
+account creation. A patch was submitted stripping invalid characters using the same validation
+logic this module uses. Closed as a duplicate of #3252021.</li>
+<li><a href="https://www.drupal.org/project/openid_connect/issues/3252021">OpenId Connect don't check username when exceeded (#3252021)</a>
+- the issue #3294141 was merged into, covering both the illegal-character case and the case where
+the claim exceeds Drupal's 60-character username limit. Since OpenID Connect 3.0.0-alpha7,
+account creation validates the username/email and throws an exception with a logged error if
+either is invalid, rather than attempting to create an invalid account - which is the error shown
+above.</li>
+<li><a href="https://www.drupal.org/project/openid_connect_windows_aad/issues/3021049">No way to alter userinfo before getting 'name' property (#3021049)</a>
+- covers the same class of problem specifically for the Windows AAD sub-module's
+<code>displayName</code>/<code>name</code> claim handling, and confirms
+<code>hook_openid_connect_userinfo_alter()</code> (the hook this module uses) as the intended
+place for a site to intercept and fix a claim like this before it's used.</li>
+</ul>
+
+<p>This module addresses both linked problems - illegal characters and excessive length - in one
+place, using that hook:</p>
+
+<ul>
+<li>Strips any character Drupal's username validation would reject from both the
+<code>preferred_username</code> and <code>name</code> claims, whichever one OpenID Connect ends
+up using.</li>
+<li>Truncates the result with headroom for OpenID Connect's own duplicate-username suffix (so a
+collision doesn't push the username back over the limit).</li>
+<li>If nothing usable survives sanitisation, removes the claim entirely rather than leaving an
+empty value, so OpenID Connect falls through to its own safe fallback.</li>
+<li>Logs a debug-level message whenever it changes a claim, recording the before and after
+values, rate-limited via Drupal's core flood control so a persistently misconfigured identity
+provider can't flood your logs.</li>
+</ul>
+
+<h3 id="module-project--post-installation">Post-Installation</h3>
+
+<p>Installing the module enables sanitisation immediately, with no further setup required.</p>
+
+<p>A settings page is available at <strong>Administration » Configuration » System » OpenID
+Connect Username Sanitizer</strong>, with a single checkbox to enable or disable the module's
+behaviour. Requires the <code>administer site configuration</code> permission. Disable it to fall
+back to OpenID Connect's original, unmodified behaviour - for example, if you'd rather usernames
+simply fail to be created than be silently altered, and prefer to fix the identity provider's
+claim format at the source instead.</p>
+
+<p>If you enable debug logging in your site's logging configuration, watch the
+<code>openid_connect_username_sanitizer</code> log channel to see exactly what was changed on any
+given login. Because this log records the raw claim value before and after sanitisation, restrict
+access to your site's logs (the <code>access site reports</code> permission) as you would for any
+other log that may contain personal data from your identity provider.</p>
+
+<h3 id="module-project--additional-requirements">Additional Requirements</h3>
+
+<p>None declared. This module deliberately has <strong>no dependency on OpenID Connect</strong>:
+its hook implementation is simply never called on a site that doesn't have OpenID Connect
+enabled, so it's safe to install alongside any other module set. It does nothing at all unless
+OpenID Connect is also installed and an SSO login returns a <code>preferred_username</code> or
+<code>name</code> claim.</p>
+
+<h3 id="module-project--similar-projects">Similar projects</h3>
+
+<p>No dedicated contrib module solving this specific problem was found. The closest prior art is
+the patches submitted directly against OpenID Connect's own issue queue (linked under Features
+above), which proposed similar character-stripping logic but were not merged into the module
+itself - the merged fix instead validates and rejects an invalid username with a logged error,
+which is the behaviour this module works alongside, rather than replaces.</p>
